@@ -11,12 +11,14 @@ import io.elasticore.base.model.pub.rules.mongo.MongoDocs;
 import io.elasticore.base.model.pub.rules.mybatis.MyBatisSql;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import static io.elasticore.base.model.pub.rules.Ctx.ctx;
 
 /**
- * An {@code html} field: markup from a rich-text editor, cleaned before it is saved (issue 183).
+ * An {@code html} field: markup from a rich-text editor, cleaned before it is saved (issues 183, 217).
  *
  * <pre>
  * Post:
@@ -25,24 +27,48 @@ import static io.elasticore.base.model.pub.rules.Ctx.ctx;
  *     contentText: text @search(like)
  * </pre>
  *
- * <p>The entity gets {@code cleanHtml()}: each html field kept to a jsoup safelist - {@code @safe(basic)}, the
- * default, or {@code relaxed} - and, where {@code @plain(field)} says so, its text without tags written to that field,
- * which no request writes (SpecFactory.prepareHtml). The method is the entity's, as derive() is: under the DDD rule
- * sets its setters are its own. The CoreService calls it on every write of the row - a save, an update, an update by
- * condition, and after a lifecycle command, whose parameter may set the field - before the row is written and
- * before the developer's beforeSave.
+ * <p>The CoreService gets a pair of methods per html field, which the developer's service (PostService extends
+ * PostCoreService) overrides - plain Java and Kotlin methods, nothing to implement:
+ *
+ * <pre>
+ * protected String cleanContent(Post row, String html) { return Html.clean(html, Safelist.basic()); } // @safe
+ * protected String plainContent(Post row, String html) { return Html.plain(html); }                  // @plain
+ * </pre>
+ *
+ * <p>The entity sets the fields itself - under the DDD rule sets the {@code @plain} copy and a field no request edits
+ * have setters of its own - from what the service hands it: {@code entity.cleanContent(html -> cleanContent(entity,
+ * html), html -> plainContent(entity, html))}. Neither method is called with null; a field set to null leaves its copy
+ * null. The service calls it after the request (or the command) changed the row and before the developer's
+ * beforeSave, and only where the field changed: on a create unless it is null, on an update and an update by
+ * condition where the request changed it (the value read is kept before the mapper writes the row), after a command
+ * where the command changed it - and also, where @plain names a field, when that copy is null while the html
+ * field has a value: a row saved before @plain was declared gets its copy on its next write. A refusal thrown from the
+ * developer's method is answered as one from beforeSave, and the row is not written (under MongoDB a batch update and an
+ * update by condition write document by document, so the documents before the refused one stay written).
+ *
+ * <p>The entity keeps the public cleanHtml() it had (issue 183), for the developer's own code that calls it: the
+ * generated defaults (the @safe safelist, the @plain copy), field by field through the same methods. The generated
+ * service no longer calls it.
  *
  * <p>An html field on a member or a value object is refused (prepareHtml): no service of theirs writes them. Under
  * MongoDB an entity without a collection of its own is kept inside the document that holds it, and the root's mapper
- * writes it from the request: the root's service cleans such a member with the root (memberStatements). The
- * runtime's {@code Html} is only compiled against jsoup, and the generated line names the safelist, so a project with
- * an html field and without jsoup stops where that line compiles. v3 and Kotlin, JPA, MyBatis and MongoDB. The
- * 2.x-compatible output stops the build here, and the 2.x generator on the loader's DSL warning.
+ * writes it from the request: the root's service gets the member's pair too and cleans such a member on every write
+ * of the root (memberStatements). The runtime's {@code Html} is only compiled against jsoup, and the generated method
+ * names the safelist, so a project with an html field and without jsoup stops where that line compiles. v3 and
+ * Kotlin, JPA, MyBatis and MongoDB. The 2.x-compatible output stops the build here, and the 2.x generator on the
+ * loader's DSL warning.
  */
 public class HtmlRules implements CodeRules {
 
     /** The annotation the loader gives a field of type html. */
     public static final String HTML = "html";
+
+    /**
+     * The service skeletons' slots: the values an update read (before the mapper writes the row), the cleaning after
+     * an update, and the cleaning after a create. Declared by each service file rule; empty, they leave no line.
+     */
+    public static final List<String> SLOTS = java.util.Collections.unmodifiableList(
+            java.util.Arrays.asList("htmlBefore", "htmlClean", "htmlCleanCreate"));
 
     private static final String RUNTIME = "io.elasticore.springboot3.html.Html";
 
@@ -62,6 +88,12 @@ public class HtmlRules implements CodeRules {
         return out;
     }
 
+    /** The field @plain names, or null. */
+    static String plainTarget(FieldSpec f) {
+        String plain = f.dslValue("plain");
+        return plain == null || plain.trim().isEmpty() ? null : plain.trim();
+    }
+
     /**
      * The service cleans the row before each write. Before the commands are written (30), which clean after their
      * move too, and before the values the model derives (40).
@@ -79,35 +111,142 @@ public class HtmlRules implements CodeRules {
                     e.domainClassName(), e.getName(), html.get(0).name()));
             return;
         }
-        List<String> members = MongoDocs.applies(e) ? memberStatements(c.syntax(), e) : new ArrayList<String>();
+        Syntax s = c.syntax();
+        Map<String, EntitySpec> owners = new LinkedHashMap<String, EntitySpec>();
+        List<String> members = MongoDocs.applies(e) ? memberStatements(s, e, owners) : new ArrayList<String>();
         if (html.isEmpty() && members.isEmpty()) return;
-        if (!html.isEmpty()) {
-            String call = c.syntax().statement("entity.cleanHtml()");
-            c.varLine("deriveBeforeSave", "%s", call);
-            c.var("htmlAfterCommand", "%s", call);
+
+        List<String> before = new ArrayList<String>();
+        List<String> clean = new ArrayList<String>();
+        List<String> create = new ArrayList<String>();
+        for (FieldSpec f : html) {
+            String name = s.escapeName(f.name());
+            String read = s.getter("entity", name);
+            String kept = f.name() + "Before";
+            String call = call(s, "entity", f);
+            // A row saved before @plain was declared has no copy yet (null): it gets one on its next write. An empty
+            // copy is a result (a body of images only) and is left alone.
+            String plain = plainTarget(f);
+            String copy = plain == null ? null : s.getter("entity", s.escapeName(plain));
+            if (s == Syntax.KOTLIN) {
+                before.add(String.format("val %s = %s", kept, read));
+                String missing = copy == null ? "" : String.format(" || %s != null && %s == null", read, copy);
+                clean.add(String.format("if (%s != %s%s) %s", read, kept, missing, call));
+                create.add(String.format("if (%s != null) %s", read, call));
+            } else {
+                before.add(String.format("String %s = %s;", kept, read));
+                String missing = copy == null ? "" : String.format(" || (%s != null && %s == null)", read, copy);
+                clean.add(String.format("if (!java.util.Objects.equals(%s, %s)%s)", read, kept, missing));
+                clean.add("    " + s.statement(call));
+                create.add(String.format("if (%s != null)", read));
+                create.add("    " + s.statement(call));
+            }
         }
-        for (String line : members) c.varLine("deriveBeforeSave", "%s", line);
+        for (String line : before) c.varLine("htmlBefore", "%s", line);
+        for (String line : clean) c.varLine("htmlClean", "%s", line);
+        for (String line : create) c.varLine("htmlCleanCreate", "%s", line);
+        for (String line : members) {
+            c.varLine("htmlClean", "%s", line);
+            c.varLine("htmlCleanCreate", "%s", line);
+        }
+        // A command's parameter may set the field: the value read before the command, the cleaning after it.
+        if (!html.isEmpty()) {
+            c.var("htmlBeforeCommand", "%s", String.join("\n        ", before));
+            c.var("htmlAfterCommand", "%s", String.join("\n        ", clean));
+        }
+
+        for (FieldSpec f : html) c.addMethod(pair(s, e.getName(), e, f));
+        for (Map.Entry<String, EntitySpec> owner : owners.entrySet()) {
+            EntitySpec member = owner.getValue();
+            String type = member.pkg("entity") + "." + member.getName();
+            for (FieldSpec f : htmlFields(member)) c.addMethod(pair(s, type, member, f));
+        }
+    }
+
+    /** The entity's call that hands it the service's pair: cleanContent(html -> cleanContent(entity, html), ...). */
+    static String call(Syntax s, String row, FieldSpec f) {
+        String cap = f.capitalName();
+        String clean = "clean" + cap;
+        String plain = "plain" + cap;
+        boolean copy = plainTarget(f) != null;
+        if (s == Syntax.KOTLIN) {
+            if (!copy) return String.format("%s.%s { %s(%s, it) }", row, clean, clean, row);
+            return String.format("%s.%s({ %s(%s, it) }, { %s(%s, it) })", row, clean, clean, row, plain, row);
+        }
+        if (!copy) return String.format("%s.%s(html -> %s(%s, html))", row, clean, clean, row);
+        return String.format("%s.%s(html -> %s(%s, html), html -> %s(%s, html))", row, clean, clean, row, plain, row);
+    }
+
+    /** The service's pair for one field: cleanContent and, where @plain names a field, plainContent. */
+    static String pair(Syntax s, String type, EntitySpec owner, FieldSpec f) {
+        String cap = f.capitalName();
+        String safelist = safelist(f.dslValue("safe"));
+        String plain = plainTarget(f);
+        String where = owner.getName() + "." + f.name();
+        StringBuilder m = new StringBuilder();
+        m.append("    /**\n")
+                .append(String.format(
+                        "     * Keeps %s to an allow-list (@safe(%s)) before the row is written: on a create, and on"
+                                + "%n",
+                        where, safelist == null ? "basic" : safelist))
+                .append("     * an update or a command that changed it - never with null. Override it to keep the\n")
+                .append(
+                        "     * field your way (the row has the request's values; on a create its key may not be drawn yet).\n")
+                .append(
+                        "     * A BadRequestException thrown here is answered as one from beforeSave: the row is not written.\n")
+                .append("     */\n");
+        String clean = String.format(
+                "%s.clean(html, org.jsoup.safety.Safelist.%s())", RUNTIME, safelist == null ? "basic" : safelist);
+        appendMethod(m, s, "clean" + cap, type, clean);
+        if (plain != null) {
+            m.append("\n\n")
+                    .append("    /**\n")
+                    .append(String.format(
+                            "     * The text of %s without tags, kept in %s (@plain): gets what clean%s returned.%n",
+                            where, plain, cap))
+                    .append(String.format("     * %s.plainLines(html) keeps a line per paragraph.%n", RUNTIME))
+                    .append("     */\n");
+            appendMethod(m, s, "plain" + cap, type, String.format("%s.plain(html)", RUNTIME));
+        }
+        return m.toString().replace("\r\n", "\n");
+    }
+
+    private static void appendMethod(StringBuilder m, Syntax s, String name, String type, String body) {
+        if (s == Syntax.KOTLIN) {
+            m.append(String.format("    protected open fun %s(row: %s, html: String?): String? =%n", name, type))
+                    .append(String.format("        %s", body));
+        } else {
+            m.append(String.format("    protected String %s(%s row, String html) {%n", name, type))
+                    .append(String.format("        return %s;%n", body))
+                    .append("    }");
+        }
     }
 
     /**
      * MongoDB keeps a member - an entity without a collection of its own, an order's line - inside the document that
      * holds it (MongoDocs), and the root's mapper writes it from the request. Its html fields are cleaned with the
-     * root's: each member's cleanHtml(), a collection's and a single one's, and those of the members it holds in turn.
-     * Empty where no member has an html field, so such a service is written as before. Members that hold each other
-     * (a line's parts holding lines) are kept to any depth, which these lines cannot reach: an html field among them
-     * stops the build.
+     * root's, on every write: each member's own method, handed the root service's pair for it - a collection's and a
+     * single one's, and those of the members it holds in turn. Empty where no member has an html field, so such a
+     * service is written as before. Members that hold each other (a line's parts holding lines) are kept to any
+     * depth, which these lines cannot reach: an html field among them stops the build.
      */
-    static List<String> memberStatements(Syntax s, EntitySpec root) {
+    static List<String> memberStatements(Syntax s, EntitySpec root, Map<String, EntitySpec> owners) {
         List<String> out = new ArrayList<String>();
         List<EntitySpec> path = new ArrayList<EntitySpec>();
         path.add(root);
-        members(s, root, "entity", 1, path, out);
+        members(s, root, "entity", 1, path, out, owners);
         return out;
     }
 
     /** The lines that clean the members a holder embeds, one statement or brace a line. */
     private static void members(
-            Syntax s, EntitySpec holder, String ref, int depth, List<EntitySpec> path, List<String> out) {
+            Syntax s,
+            EntitySpec holder,
+            String ref,
+            int depth,
+            List<EntitySpec> path,
+            List<String> out,
+            Map<String, EntitySpec> owners) {
         for (FieldSpec f : MyBatisSql.fields(holder)) {
             if (!MongoDocs.isEmbeddedMember(holder, f)) continue;
             EntitySpec target = holder.related(f.coreItemType());
@@ -119,9 +258,12 @@ public class HtmlRules implements CodeRules {
             }
             String m = depth == 1 ? "m" : "m" + depth;
             List<String> inner = new ArrayList<String>();
-            if (!htmlFields(target).isEmpty()) inner.add(s.statement(m + ".cleanHtml()"));
+            for (FieldSpec h : htmlFields(target)) {
+                inner.add(s.statement(call(s, m, h)));
+                owners.put(target.getName(), target);
+            }
             path.add(target);
-            members(s, target, m, depth + 1, path, inner);
+            members(s, target, m, depth + 1, path, inner, owners);
             path.remove(path.size() - 1);
             if (inner.isEmpty()) continue;
             String read = s.getter(ref, f.name());
@@ -169,43 +311,133 @@ public class HtmlRules implements CodeRules {
                 root.domainClassName(), owner.getName(), html.name(), owner.getName(), root.getName(), names));
     }
 
-    /** The entity's cleanHtml(). */
+    /** The entity's method per html field: it sets the field, and its @plain copy, from the functions it is handed. */
     @Rule(value = "entity-html", target = "entity", order = 98, phase = Rule.Phase.TAIL)
     void entity(EntitySpec e) {
-        List<FieldSpec> html = htmlFields(e);
+        List<FieldSpec> all = htmlFields(e);
+        // A parent's field (@extend) has its methods in the parent's class, which the class extends.
+        List<FieldSpec> html = new ArrayList<FieldSpec>();
+        for (FieldSpec f : all) {
+            if (declared(e, f)) html.add(f);
+        }
         if (html.isEmpty()) return;
+        boolean inherits = html.size() < all.size();
         SourceCode c = ctx(e);
         if (c.compatible()) return;
         Syntax s = c.syntax();
+        for (FieldSpec f : html) {
+            String plain = plainTarget(f);
+            String clean = "clean" + f.capitalName();
+            c.varLine("fieldList", "")
+                    .varLine("fieldList", "/**")
+                    .varLine(
+                            "fieldList",
+                            " * Sets %s to what clean makes of it%s; %s",
+                            f.name(),
+                            plain == null ? "" : String.format(" and %s to what plain makes of that", plain),
+                            plain == null ? "it is not" : "neither is")
+                    .varLine(
+                            "fieldList",
+                            " * called with null. The service calls it with its %s%s when %s changed.",
+                            clean,
+                            plain == null ? "" : " and plain" + f.capitalName(),
+                            f.name())
+                    .varLine("fieldList", " */");
+            if (s == Syntax.KOTLIN) {
+                c.varLine(
+                        "fieldList",
+                        plain == null
+                                ? String.format("fun %s(clean: (String) -> String?) {", clean)
+                                : String.format(
+                                        "fun %s(clean: (String) -> String?, plain: (String) -> String?) {", clean));
+            } else {
+                c.varLine(
+                        "fieldList",
+                        plain == null
+                                ? String.format(
+                                        "public void %s(java.util.function.UnaryOperator<String> clean) {", clean)
+                                : String.format(
+                                        "public void %s(java.util.function.UnaryOperator<String> clean,"
+                                                + " java.util.function.UnaryOperator<String> plain) {",
+                                        clean));
+            }
+            for (String line : statements(s, f)) c.varLine("fieldList", "    %s", line);
+            c.varLine("fieldList", "}");
+        }
+        // Kept for the developer's own code, which may call it (issue 183's method): the defaults, each field.
         c.varLine("fieldList", "")
                 .varLine("fieldList", "/**")
                 .varLine(
                         "fieldList",
-                        " * Keeps each html field to its safelist (@safe) and writes its text without tags")
-                .varLine("fieldList", " * where @plain says. Called by the service before each write; call it after")
-                .varLine("fieldList", " * setting one yourself.")
+                        " * Keeps each html field to the safelist @safe names and writes its text without tags")
+                .varLine(
+                        "fieldList",
+                        " * where @plain says - the generated defaults. The generated service no longer calls it:")
+                .varLine(
+                        "fieldList",
+                        " * it hands each field its CoreService pair (cleanX / plainX), which your service may")
+                .varLine(
+                        "fieldList",
+                        " * override. Call it after setting a field yourself when the defaults are what you want.")
                 .varLine("fieldList", " */");
-        c.varLine("fieldList", s == Syntax.KOTLIN ? "fun cleanHtml() {" : "public void cleanHtml() {");
-        for (String line : statements(s, html)) c.varLine("fieldList", "    %s", line);
+        if (s == Syntax.KOTLIN) {
+            // A parent's is open for its children (Kotlin members are final otherwise); a child's overrides it.
+            c.varLine(
+                    "fieldList",
+                    inherits
+                            ? "override fun cleanHtml() {"
+                            : e.hasMeta("abstract") ? "open fun cleanHtml() {" : "fun cleanHtml() {");
+        } else {
+            if (inherits) c.varLine("fieldList", "@Override");
+            c.varLine("fieldList", "public void cleanHtml() {");
+        }
+        if (inherits) c.varLine("fieldList", "    %s", s.statement("super.cleanHtml()"));
+        for (FieldSpec f : html) c.varLine("fieldList", "    %s", defaultCall(s, f));
         c.varLine("fieldList", "}");
     }
 
-    /** What cleanHtml() does, one statement a line. */
-    static List<String> statements(Syntax s, List<FieldSpec> html) {
+    /** Whether the field is the entity's own, not a parent's it inherits (@extend). */
+    private static boolean declared(EntitySpec e, FieldSpec f) {
+        for (FieldSpec own : e.fields()) {
+            if (own.name().equals(f.name())) return true;
+        }
+        return false;
+    }
+
+    /** One field's line in cleanHtml(): its own method, handed the runtime's defaults. */
+    static String defaultCall(Syntax s, FieldSpec f) {
+        String cap = f.capitalName();
+        String safelist = safelist(f.dslValue("safe"));
+        String clean = String.format(
+                "%s.clean(%s, org.jsoup.safety.Safelist.%s())",
+                RUNTIME, s == Syntax.KOTLIN ? "it" : "html", safelist == null ? "basic" : safelist);
+        String plain = String.format("%s.plain(%s)", RUNTIME, s == Syntax.KOTLIN ? "it" : "html");
+        boolean copy = plainTarget(f) != null;
+        if (s == Syntax.KOTLIN) {
+            return copy
+                    ? String.format("this.clean%s({ %s }, { %s })", cap, clean, plain)
+                    : String.format("this.clean%s { %s }", cap, clean);
+        }
+        return copy
+                ? String.format("this.clean%s(html -> %s, html -> %s);", cap, clean, plain)
+                : String.format("this.clean%s(html -> %s);", cap, clean);
+    }
+
+    /** What the entity's method does, one statement a line. */
+    static List<String> statements(Syntax s, FieldSpec f) {
         List<String> out = new ArrayList<String>();
-        for (FieldSpec f : html) {
-            String name = s.escapeName(f.name());
-            String safelist = safelist(f.dslValue("safe"));
-            String cleaned = String.format(
-                    "%s.clean(%s, org.jsoup.safety.Safelist.%s())",
-                    RUNTIME, s.getter("this", name), safelist == null ? "basic" : safelist);
-            out.add(s.statement(s.setter("this", name, cleaned)));
-            String plain = f.dslValue("plain");
-            if (plain != null && !plain.trim().isEmpty()) {
-                out.add(s.statement(s.setter(
-                        "this",
-                        s.escapeName(plain.trim()),
-                        String.format("%s.plain(%s)", RUNTIME, s.getter("this", name)))));
+        String name = s.escapeName(f.name());
+        String read = s.getter("this", name);
+        String plain = plainTarget(f);
+        if (s == Syntax.KOTLIN) {
+            out.add(String.format("val html = %s?.let(clean)", read));
+            out.add(s.setter("this", name, "html"));
+            if (plain != null) out.add(s.setter("this", s.escapeName(plain), "html?.let(plain)"));
+        } else {
+            out.add(String.format("String html = %s == null ? null : clean.apply(%s);", read, read));
+            out.add(s.statement(s.setter("this", name, "html")));
+            if (plain != null) {
+                out.add(s.statement(s.setter("this", plain, "html == null ? null : plain.apply(html)")));
             }
         }
         return out;

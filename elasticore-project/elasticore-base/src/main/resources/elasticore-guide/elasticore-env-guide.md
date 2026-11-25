@@ -685,7 +685,7 @@ config:
 - What is checked: the types of entity and DTO fields (including the X in `List<X>`, and those with a domain name such as `catalog:Product`), the DTO's
   `@template(...)`, the entity's `@extend(...)`, and the process manager's `on: [shop:OrderPlaced]` ("process manager" in
   `elasticore-dsl-guide.md`). If two domains have the same name, it cannot tell which one is meant, so it does not check
-  (the loader warns separately). The 3.0 rule engine (`elcore3`) checks before generation, and on failure it reports all problems at once and then stops the build.
+  (the loader warns: a type name is unique across domains - rename one). The 3.0 rule engine (`elcore3`) checks before generation, and on failure it reports all problems at once and then stops the build.
   The 2.x generator (`elcore`) does not read `context:`.
 - **Context map**: if any domain has `context:`, `blueprint/context-map.md` is created (a Mermaid diagram -
   GitHub shows it as it is). Arrows go from the side that is used (upstream) to the side that uses it, labeled with the type and event names that cross.
@@ -755,7 +755,7 @@ unit test; `"true"` keeps its meaning, and a model without `"contract"` generate
 
 | The DSL says | The test |
 |---|---|
-| a move of `states:` | allowed from each state it lists: 2xx, the state moved, a `@stamp` of the state entered set; refused from each other state a row can reach: 409 `state.<Entity>.<field>.<command>`. A new row starts in `initial` |
+| a move of `states:` | allowed from each state it lists: 2xx, the state moved, a `@stamp` of the state entered set; refused from each other state a row can reach: 409 `state.<Entity>.<field>.<command>`. A new row starts in `initial`. A parameter of the command named as the field that holds a reference's key, of its type (`boardId` of `board: Board`), is sent the key of a row the test makes first, as a row that needs one makes it |
 | `!` (required) | sent as null: 400, the field, `NotNull` |
 | `string(n)`, `@length` | n characters pass, n + 1 are refused: 400 `Size` (and the least length, where one is given) |
 | `@min`, `@max` | the bound passes, one step past it is refused: 400 `Min` / `Max` (`DecimalMin` / `DecimalMax` on a decimal) |
@@ -780,7 +780,10 @@ unit test; `"true"` keeps its meaning, and a model without `"contract"` generate
 - The tests of `@access` sign in principals of their own: `signIn(role)` makes one as the application itself, with that role in the
   `@signin` entity's role field (`"M"` for `UserRole.MANAGER` written `@json(code)`), signs it in through the generated sign-in and
   returns a `Caller` - its key, which a row's `@owner` holds, and its session; `sentBy(caller, ...)` sends a request as it, or as a
-  visitor for `null`. A row of a caller's is made by the administrator - as the application itself (`asTheSystem`) where no
+  visitor for `null`. A sign-in's session is kept with the cookies the sign-in answers with, and both are sent (`perform`,
+  `sentBy`): under Spring Session (`spring-session-jdbc`, ...) the signed-in session is the one its `SESSION` cookie names, not the
+  container's; where the container keeps the sessions there is no cookie and nothing more is sent.
+  A row of a caller's is made by the administrator - as the application itself (`asTheSystem`) where no
   administrator signs in - with the owner sent, or by the caller where the server sets `@owner`; the `@signin` entity's own row is
   the caller's. Sign in your way in `signIn(role)`. A support class of yours kept by a merge without these members gets no test of
   `@access` (the build never breaks): the summary names the member, and `build/elasticore/contract/` holds the version generated.

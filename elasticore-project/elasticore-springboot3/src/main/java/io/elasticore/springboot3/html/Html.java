@@ -1,10 +1,19 @@
 package io.elasticore.springboot3.html;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
+import org.jsoup.nodes.Node;
+import org.jsoup.nodes.TextNode;
 import org.jsoup.safety.Cleaner;
 import org.jsoup.safety.Safelist;
+import org.jsoup.select.NodeFilter;
+import org.jsoup.select.NodeTraversor;
 
 /**
  * What an {@code html} field holds: markup from a rich-text editor, kept to an
@@ -85,5 +94,137 @@ public final class Html {
     public static String plain(String html) {
         if (html == null) return null;
         return Jsoup.parse(html).text();
+    }
+
+    /** The elements a line ends after in {@link #plainLines}. */
+    private static final Set<String> LINE_ENDS = new HashSet<String>(
+            Arrays.asList("p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "pre", "div", "tr", "br", "hr"));
+
+    /**
+     * The text without tags, one line per paragraph - for a preview or a
+     * summary that shows the first lines. A line ends after a {@code p},
+     * {@code h1}-{@code h6}, {@code li}, {@code blockquote}, {@code pre},
+     * {@code div}, {@code tr}, {@code br} and {@code hr}; a list item gets no
+     * marker. Blocks inside each other end one line, not several:
+     * {@code <blockquote><p>a</p></blockquote><ul><li><p>b</p></li></ul>} is
+     * {@code a\nb}. Two {@code br} in a row leave one blank line, and never
+     * more than one. Within a line white space is collapsed as in
+     * {@link #plain}, spaces before a line's end are dropped, and so is white
+     * space at both ends. The text of a {@code pre} is kept as written, its blank
+     * lines and its spaces included.
+     */
+    public static String plainLines(String html) {
+        if (html == null) return null;
+        Lines lines = new Lines();
+        NodeTraversor.filter(lines, Jsoup.parseBodyFragment(html).body());
+        return lines.text();
+    }
+
+    /**
+     * Writes the text of the nodes it visits, a line at a time. A pre's text is
+     * kept as written: it stands in the lines as a mark, which the clean-up of
+     * the lines leaves alone, and is put back at the end.
+     */
+    private static final class Lines implements NodeFilter {
+        /** Around a pre's number in the lines: not a character of text or of white space. */
+        private static final char MARK = (char) 0xFFFF;
+
+        private final StringBuilder out = new StringBuilder();
+        private final List<String> pres = new ArrayList<String>();
+        private boolean space;
+
+        @Override
+        public FilterResult head(Node node, int depth) {
+            if (node instanceof TextNode text) {
+                words(text.getWholeText());
+            } else if (node instanceof Element el) {
+                if ("br".equals(el.normalName())) {
+                    out.append('\n');
+                    space = false;
+                } else if ("pre".equals(el.normalName())) {
+                    endLine();
+                    out.append(MARK).append(pres.size()).append(MARK);
+                    pres.add(preText(el));
+                    return FilterResult.SKIP_CHILDREN;
+                } else if (LINE_ENDS.contains(el.normalName())) {
+                    endLine();
+                } else if (el.isBlock()) {
+                    space = true;
+                }
+            }
+            return FilterResult.CONTINUE;
+        }
+
+        @Override
+        public FilterResult tail(Node node, int depth) {
+            if (!(node instanceof Element el) || "br".equals(el.normalName())) return FilterResult.CONTINUE;
+            if (LINE_ENDS.contains(el.normalName())) endLine();
+            else if (el.isBlock()) space = true;
+            return FilterResult.CONTINUE;
+        }
+
+        /** A pre's text as written, carriage returns dropped and the one line break that closes it too. */
+        private static String preText(Element pre) {
+            String text = pre.wholeText().replace("\r", "");
+            return text.endsWith("\n") ? text.substring(0, text.length() - 1) : text;
+        }
+
+        /** Ends the line written so far, unless nothing is written on it. */
+        private void endLine() {
+            if (out.length() > 0 && out.charAt(out.length() - 1) != '\n') out.append('\n');
+            space = false;
+        }
+
+        /** Text with its white space collapsed to one space, none at the start of a line. */
+        private void words(String text) {
+            for (int i = 0; i < text.length(); i++) {
+                char ch = text.charAt(i);
+                if (isSpace(ch)) {
+                    space = true;
+                    continue;
+                }
+                if (space && out.length() > 0 && out.charAt(out.length() - 1) != '\n') out.append(' ');
+                space = false;
+                out.append(ch);
+            }
+        }
+
+        /** Spaces before a line's end dropped, at most one blank line, both ends stripped; then the pres put back. */
+        String text() {
+            String[] rows = out.toString().split("\n", -1);
+            StringBuilder sb = new StringBuilder();
+            int blank = 0;
+            for (String row : rows) {
+                String line = stripTrailing(row);
+                if (line.isEmpty()) {
+                    blank++;
+                    continue;
+                }
+                if (sb.length() > 0) sb.append(blank > 0 ? "\n\n" : "\n");
+                blank = 0;
+                sb.append(line);
+            }
+            String result = stripLeading(sb.toString());
+            for (int i = 0; i < pres.size(); i++) {
+                result = result.replace(MARK + String.valueOf(i) + MARK, pres.get(i));
+            }
+            return result;
+        }
+
+        private static String stripTrailing(String s) {
+            int end = s.length();
+            while (end > 0 && isSpace(s.charAt(end - 1))) end--;
+            return s.substring(0, end);
+        }
+
+        private static String stripLeading(String s) {
+            int start = 0;
+            while (start < s.length() && isSpace(s.charAt(start))) start++;
+            return s.substring(start);
+        }
+
+        private static boolean isSpace(char ch) {
+            return Character.isWhitespace(ch) || Character.isSpaceChar(ch);
+        }
     }
 }

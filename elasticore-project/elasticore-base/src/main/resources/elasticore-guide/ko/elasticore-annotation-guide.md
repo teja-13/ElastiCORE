@@ -173,7 +173,7 @@ User:
   meta: entity @extend(AuditEntity)
 ```
 어느 도메인의 Entity 나 DTO 도 아닌 부모는 오류가 아니라 DSL 경고입니다 (`unresolved @extend parent 'X' - no matching Entity or DTO found in any domain`, `elcoreValidate -Pstrict` 는 이것으로 실패):
-직접 작성한 클래스를 일부러 부모로 둘 수 있습니다. 전체 클래스 이름(`com.acme.support.BaseRecord`)으로 적으세요 - 도메인을 붙인 이름(`other:Parent`)처럼 찾아보지 않습니다. 단순 이름이면 경고합니다.
+직접 작성한 클래스를 일부러 부모로 둘 수 있습니다. 전체 클래스 이름(`com.acme.support.BaseRecord`)으로 적으세요 - 찾아보지 않습니다. 단순 이름이면 경고합니다. 다른 도메인의 부모(`common` 의 공통 `@abstract` 기반 클래스)는 단순 이름 `@extend(AuditEntity)` 로 적고, 그 도메인에서 import 됩니다 - 3.0 코드가 쓰는 모든 모드, 언어, 아키텍처에서. 부모는 자기 도메인에 그대로 있고 다른 도메인은 복사본을 두지 않습니다: 타입 이름은 모든 도메인에서 하나뿐입니다 (두 도메인이 같은 이름을 선언하면 DSL 경고 - 하나의 이름을 바꾸세요). 2.x 처럼 도메인을 붙여 `common:AuditEntity` 로 적어도 같게 읽습니다.
 
 ### @embeddable
 > **동작:** JPA, MyBatis (mode: mybatis) · **안 됨:** MyBatis (mode: mybatis) 에서 다른 값 객체, 관계 또는 컬렉션을 담은 값 객체 (빌드 중단)
@@ -229,6 +229,7 @@ v3 매퍼는 `@writeonly` 값을 엔티티 -> DTO 로 복사하지 않습니다(
 UserProfile:
   meta: entity @table(user_profile_tbl)
 ```
+env.yml 의 `table.prefix` 는 이 이름 앞에도 붙습니다 (2.x 와 같음): `prefix: jp_` 에서 `@table(PL_QUOT)` 은 테이블 `jp_pl_quot` 입니다. 쓴 그대로의 이름(데이터 사전)을 쓰려면 `table.prefix` 를 빼고 `@table` 마다 전체 이름을 쓰세요.
 
 ### @schema(name)
 > **Since: 2.1.260409**
@@ -259,6 +260,11 @@ tableSchema: schema_a
 Message:
   meta: entity @Index(name="idx_msg_date", columnList="create_date,status")
 ```
+
+`columnList` 에는 테이블의 컬럼 이름을 씁니다. 참조는 그 이름과 키 이름을 이은 컬럼이라
+(layered 에서 키가 `productCode` 인 `product` 는 `product_product_code`) 아키텍처에 따라 달라집니다.
+테이블에 없는 이름은 빌드 때 경고가 나고, 있는 컬럼을 함께 알려 줍니다 - 그대로면 테이블 생성이 실패합니다
+(JPA; MyBatis 는 도메인이 DDL 을 쓸 때).
 
 ### @rollup
 > **동작:** JPA · **안 됨:** MyBatis (mode: mybatis) (빌드 중단)
@@ -1171,6 +1177,10 @@ drivers: List<RentDriver> @search(eq)
 ```java
 sp.and((r,q,c) -> r.get("status").in(status));
 ```
+빈 목록은 보내지 않은 것과 같이 조건이 없습니다 (JPA, MyBatis, MongoDB 모두 전체 행). "해당 행 없음"이 맞다면
+검색 전에 서비스에서 빈 페이지를 돌려주세요. 값의 개수는 검색 DTO 필드에 `@maxsize(n)` 으로 제한합니다
+(`postIds: List<Long> @search(in) @maxsize(200)`): `@Size(max=200)` 이 되어, 더 긴 목록은 쿼리를 만들기 전에
+400 입니다.
 
 **List<Entity> 필드:**
 ```java
@@ -1245,11 +1255,11 @@ dto:
     fields:
       reason: string(100)       # DTO 에 선언한 필드: 항상 남음
 ```
-- 거르는 것은 복사되는 필드뿐입니다. DTO 에 선언한 필드는 항상 남고, 적은 이름이면 복사되는 것을 덮어씁니다. 나중에 엔티티에 추가된 필드는 적기 전까지 DTO 에 없습니다. 다른 도메인의 모델은 `shop:Order[note]` 로 적습니다.
+- 거르는 것은 복사되는 필드뿐입니다. DTO 에 선언한 필드는 항상 남고, 적은 이름이면 복사되는 것을 덮어씁니다. 나중에 엔티티에 추가된 필드는 적기 전까지 DTO 에 없습니다. 다른 도메인의 모델도 단순 이름으로 적습니다: `Order[note]`.
 - 모델이 자기 `@extend` 로 물려받은 필드도 적을 수 있습니다. 관계 이름은 그 id 를 담는 필드를 남깁니다. DDD 참조의 `customer` 는 `customerId` 를 남기고, `customerId` 를 직접 적으면 거부됩니다. 목록을 참조 변환 전에 검사하기 때문입니다.
 - DTO 에 아무 필드도 만들지 못하는 이름은 거부됩니다. id 를 담는 필드가 없는 관계(대신 id 를 선언합니다. `orderId: long @ref(order.orderId)`), 컬렉션, 그리고 DTO 가 값 객체를 담지 않는 경우의 값 객체입니다(`ddd`·`hexagonal` 과 layered MyBatis 는 값 객체를 통째로 담고, layered JPA·호환 출력·2.x 는 담지 않습니다).
 - 모델에 없는 이름, 어느 도메인에도 없는 모델, 같은 모델을 두 번 적은 경우(`Order[note], Order[total]` 또는 `Order, Order[note]`), 같은 필드를 두 번 적은 경우(`Order[note, note]`), 빈 괄호(`Order[]`), 적은 필드에 `--`, `@extend` 와 함께 쓴 목록, 엔티티에 쓴 목록은 생성을 멈춥니다.
-- 목록을 쓸 때 여러 도메인에 있는 이름은 어느 쪽인지 적어야 합니다: `shop:Order[note]`. 괄호가 없는 DTO 는 전과 같습니다.
+- 타입 이름은 모든 도메인에서 하나뿐이므로, 이름은 어느 도메인에 있든 그 모델을 찾습니다. 목록을 쓸 때 두 도메인이 선언한 이름은 빌드를 멈춥니다 (`... both have Order - a type name is unique across domains: rename one`).
 - `@searchable`, `@searchResult` 에는 목록을 쓸 수 없고, 쓰면 생성을 멈춥니다. 검색 DTO 는 이미 검색 조건이 있는 필드만 받습니다.
 - 키를 뺀 목록은 먼저 선언해도 엔티티의 서비스와 컨트롤러가 쓰는 DTO 가 되지 않습니다. 키를 포함한 목록은 될 수 있으므로, 서비스가 쓸 DTO 를 먼저 선언합니다.
 
@@ -2579,13 +2589,57 @@ Post:
     contentText: text @search(like)                       # its text without tags, for the search
 ```
 
-- `html` 은 `text` 와 같은 긴 문자열(같은 컬럼)이고, HTML 이라고 표시됩니다. 엔티티에 `cleanHtml()` 이 생기는데, html 필드를 각각
-  jsoup 허용 목록으로 거르고 태그를 뺀 텍스트를 `@plain` 필드에 씁니다. CoreService 가 모든 쓰기에서 부릅니다 - 저장, 수정,
-  조건 수정, 그리고 파라미터로 그 필드를 바꾸는 라이프사이클 command 뒤 - 행을 쓰기 전, `beforeSave` 보다 먼저.
-  남긴 것은 다시 서식을 바꾸지 않습니다.
+- `html` 은 `text` 와 같은 긴 문자열(같은 컬럼)이고, HTML 이라고 표시됩니다. CoreService 에 html 필드마다 메서드 한 쌍이 생겨
+  `@safe` 와 `@plain` 이 말하는 일을 합니다: `cleanContent` 는 마크업을 jsoup 허용 목록으로 거르고, `plainContent` 는 - `@plain` 이
+  필드를 가리킬 때만 - 태그를 뺀 텍스트를 줍니다. 엔티티가 그 반환값으로 필드와 복사본을 직접 씁니다 (ddd, hexagonal 에서는
+  복사본의 setter 가 엔티티 자신의 것). `plainContent` 는 `cleanContent` 가 돌려준 것을 받습니다. 서식은 다시 바꾸지 않습니다.
+
+  ```java
+  // PostCoreService (generated)
+  protected String cleanContent(Post row, String html) { return Html.clean(html, Safelist.basic()); }  // @safe(basic)
+  protected String plainContent(Post row, String html) { return Html.plain(html); }                   // @plain(contentText)
+  ```
+- 요청(또는 command)이 행을 바꾼 뒤, `beforeSave` 보다 먼저, 그리고 필드가 바뀐 경우에만 불립니다: 생성에서는 null 이 아니면;
+  수정, 일괄 수정, 조건 수정에서는 요청이 그 필드를 바꿨을 때 (서비스가 읽은 값을 기억해 둡니다); 라이프사이클 command 뒤에는
+  command 가 바꿨을 때 - 관리자가 숨기기만 한 글은 다시 거르지 않습니다. 둘 다 null 로는 불리지 않고, null 이 된 필드는
+  `@plain` 복사본도 null 로 둡니다. `@plain` 을 선언하기 전에 저장된 행은 다음 쓰기에서 복사본을 얻습니다: html 필드에 값이 있고
+  복사본이 null 이면 쌍이 불립니다. 빈 복사본은 결과(이미지만 있는 본문)이므로 그대로 둡니다 - 다만 Oracle 은 빈 문자열을
+  NULL 로 저장하므로, 거기서는 그런 행이 다음 쓰기에서 다시 걸러집니다. 필드가 html 이 되기 전에, 또는 더 느슨한
+  규칙으로 저장된 값은 바뀔 때까지 다시 걸러지지 않습니다:
+  그런 행에는 쌍이나 `cleanHtml()` 을 한 번 돌립니다.
+- **자기 규칙은 이 쌍을 오버라이드합니다** - 내 서비스(`PostService extends PostCoreService`, 한 번만 생성되고 내 것)에서. 행에는
+  요청의 값이 이미 들어 있습니다 (생성에서는 데이터베이스가 정하는 키가 아직 없을 수 있음). 거기서 던진 거절 -
+  내 코드를 단 `BadRequestException`, `beforeSave` 에서처럼 - 은 똑같이 답합니다: 400 과 그 코드와 번역, 그리고
+  그 행은 쓰지 않습니다. MongoDB 에서 일괄 수정과 조건 수정은 트랜잭션 없이 문서를 하나씩 쓰므로, 거절된 문서 앞의
+  문서들은 쓰인 채로 남습니다. 이 사이트의 이미지만 남기기(다른 호스트의 이미지는 누가 글을 읽는지 그 호스트에
+  알립니다), 빈 글 거절, 문단마다 한 줄:
+
+  ```java
+  @Override
+  protected String cleanContent(Post row, String html) {
+      Document doc = Jsoup.parseBodyFragment(Html.clean(html, Safelist.relaxed()));
+      for (Element img : doc.select("img")) {
+          if (!img.attr("src").startsWith("/api/files/")) img.remove();     // only files uploaded here
+      }
+      if (doc.body().text().isBlank() && doc.select("img").isEmpty())
+          throw new BadRequestException("post.content.required", "A post needs a body");
+      doc.outputSettings().prettyPrint(false);
+      return doc.body().html();
+  }
+
+  @Override
+  protected String plainContent(Post row, String html) {
+      return Html.plainLines(html);                                          // a line per paragraph
+  }
+  ```
+  Kotlin 에서는 `protected open fun cleanContent(row: Post, html: String?): String?` 이고, 같은 방법으로 오버라이드합니다.
+- `Html.plainLines(html)` (런타임) 은 `p`, `h1`-`h6`, `li`, `blockquote`, `pre`, `div`, `tr`, `br`, `hr` 뒤에서 줄을 바꾸고, 목록
+  항목 앞에 표시를 붙이지 않으며, 줄 끝의 공백을 지우고, 빈 줄은 하나까지만 두고, 양 끝을 다듬습니다; 겹친 블록은 한 줄만
+  끝냅니다: `<blockquote><p>a</p></blockquote><ul><li><p>b</p></li></ul>` 은 `a\nb`. `Html.plain` 은 모두 한 줄로 잇습니다.
 - MongoDB 에서 자기 컬렉션이 없는 엔티티(서비스도 `@repository` 도 없는 것 - 주문의 줄)는 그것을 가진 문서 안에 저장되고,
-  요청이 그 문서와 함께 씁니다: 가진 쪽의 서비스가 같은 쓰기마다 그 엔티티의 `cleanHtml()` 을 부릅니다 - 컬렉션의 멤버,
-  하나뿐인 멤버, 그리고 그들이 가진 멤버까지 - 가진 쪽 자신의 것 다음, `beforeSave` 보다 먼저.
+  요청이 그 문서와 함께 씁니다: 가진 쪽의 서비스에 그 멤버의 쌍도 생기고(`cleanNote(OrderLine row, String html)`), 가진 쪽의
+  쓰기마다 바뀌었든 아니든 그 멤버를 거릅니다 - 컬렉션의 멤버, 하나뿐인 멤버, 그리고 그들이 가진 멤버까지 - 가진 쪽 자신의
+  필드 다음, `beforeSave` 보다 먼저.
 - 기본값 `@safe(basic)` 은 글 서식(문단, 강조, 목록, 인용, 코드)과 링크(http, https, ftp, mailto)를 `rel="nofollow"` 와 함께 남기고,
   이미지는 남기지 않습니다. `@safe(relaxed)` 는 제목, 표, 이미지(http, https)도 남기고 `rel` 은 붙이지 않습니다. 스크립트와 그 내용,
   `on...` 핸들러, `javascript:` 링크, 그 밖의 태그·속성은 모두 지웁니다: jsoup 의 `Safelist.basic()` / `relaxed()`.
@@ -2594,9 +2648,9 @@ Post:
   `https://host/x.png` 로도 갈 수 있던 호스트입니다. 이 사이트로 가는 링크에는 `rel` 이 붙지 않고, 다른 호스트로 가는 링크에
   `rel="nofollow"` 가 붙습니다. 여기서는 경로처럼 보여도 브라우저가 다른 호스트로 읽는 링크(`/\host`, `https:host`)는 지웁니다.
 - `@safe(relaxed)` 는 어느 http, https 호스트의 이미지든 남기고, 이미지를 불러오면 그 호스트가 누가 페이지를 읽는지 알게 됩니다.
-  작성자가 넣어도 되는 이미지(예: 자신이 올린 파일)는 애플리케이션이 `beforeSave` 에서 - 거른 뒤에 - 확인합니다.
+  작성자가 넣어도 되는 이미지(예: 자신이 올린 파일)는 애플리케이션이 자기 `cleanContent` (위) 에서 확인합니다.
 - `@plain(field)` 은 같은 엔티티의 긴 문자열 필드(`text`, `longtext`, `clob`)를 가리킵니다. 태그를 뺀 텍스트 - 엔티티를 풀고
-  공백을 줄인 것 - 가 모든 쓰기마다 거기에 쓰이고, 요청은 쓰지 못합니다 (DTO 와 TypeScript 에서 읽기 전용). 그 필드에
+  공백을 줄인 것 - 가 html 필드를 거를 때마다 거기에 쓰이고, 요청은 쓰지 못합니다 (DTO 와 TypeScript 에서 읽기 전용). 그 필드에
   `@search` 를 붙이면 검색은 마크업도, 지워진 스크립트의 내용도 아닌 글의 낱말을 읽습니다.
 - 애플리케이션이 jsoup 을 추가합니다: `implementation 'org.jsoup:jsoup:1.23.2'`. ElastiCORE 런타임은 jsoup 으로 컴파일만 하고,
   생성된 줄이 `org.jsoup.safety.Safelist` 를 이름으로 쓰므로 jsoup 이 없으면 빌드가 그 줄에서 멈춥니다.
@@ -2605,8 +2659,10 @@ Post:
   html 이 아닌 필드의 `@safe`·`@plain`; 애그리거트의 멤버나 값 객체(`@embeddable`)의 html 필드 -
   그것은 루트의 서비스가 저장하고 거르지 않습니다; 2.x 호환 출력; 그리고 요청이 보낸 것을 그대로 저장할
   2.x 생성기(`elcore`).
-- 서비스가 행을 거른 뒤에 넣은 값(`beforeSave` 안이나 리포지터리를 통해)은 걸러지지 않습니다: 값을 넣은 뒤에
-  `entity.cleanHtml()` 을 부릅니다.
+- 서비스가 행을 거른 뒤에 넣은 값(`beforeSave` 안이나 리포지터리를 통해)은 걸러지지 않습니다: 값을 넣은 뒤에 엔티티에 쌍을
+  넘깁니다, `entity.cleanContent(html -> cleanContent(entity, html), html -> plainContent(entity, html))`.
+  `entity.cleanHtml()` 은 그것을 부르는 코드를 위해 남아 있습니다: 모든 html 필드에 생성된 기본값(`@safe`, `@plain`)을 적용하고,
+  내 오버라이드는 쓰지 않습니다 - 생성된 서비스는 더 이상 부르지 않습니다.
 
 ## @encrypt — 암호화해 저장하고 같음으로 찾는 컬럼 (v3)
 > **동작:** v3 (JPA: layered, ddd, hexagonal), Kotlin, MyBatis (mode: mybatis) · **미동작:** MongoDB (mode: mongo) (빌드 중단); 2.x 호환 출력 (output = 'v2') (빌드 중단); 2.x 생성기 (빌드 중단)

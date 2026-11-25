@@ -173,7 +173,7 @@ User:
   meta: entity @extend(AuditEntity)
 ```
 A parent that is no Entity or DTO of any domain is a DSL warning (`unresolved @extend parent 'X' - no matching Entity or DTO found in any domain`, which `elcoreValidate -Pstrict` fails on), not an error:
-a class you wrote by hand can be the parent on purpose. Name it by its full class name (`com.acme.support.BaseRecord`), which is not looked up, as a domain-qualified name (`other:Parent`) is not - by its simple name it warns.
+a class you wrote by hand can be the parent on purpose. Name it by its full class name (`com.acme.support.BaseRecord`), which is not looked up - by its simple name it warns. A parent of another domain (a shared `@abstract` base in `common`) is named simply, `@extend(AuditEntity)`, and imported from its domain, in every mode, language and architecture the 3.0 code writes. It stays in that domain, and no other domain keeps a copy of it: a type name is unique across all domains (a name two domains declare is a DSL warning - rename one). Written with its domain, `common:AuditEntity`, as 2.x accepted, it is read the same.
 
 ### @embeddable
 > **Works in:** JPA, MyBatis (mode: mybatis) · **Not in:** MyBatis (mode: mybatis) for a value object that holds another value object, a relation or a collection (stops the build)
@@ -229,6 +229,7 @@ Sets the table name explicitly. If not set, the entity name is converted to snak
 UserProfile:
   meta: entity @table(user_profile_tbl)
 ```
+`table.prefix` of env.yml goes before this name too, as in 2.x: `@table(PL_QUOT)` with `prefix: jp_` is the table `jp_pl_quot`. For names used exactly as written (a data dictionary), leave `table.prefix` out and write the whole name in each `@table`.
 
 ### @schema(name)
 > **Since: 2.1.260409**
@@ -259,6 +260,11 @@ Defines a database index. Generates `@Table(indexes=...)`.
 Message:
   meta: entity @Index(name="idx_msg_date", columnList="create_date,status")
 ```
+
+`columnList` names the table's columns. A reference is the column of its name and the key's (`product` with the key
+`productCode` is `product_product_code` in layered), so its column depends on the architecture. A name the table does
+not have is a warning at build time, with the columns there are - creating the table would fail on it (JPA; MyBatis when
+the domain writes a DDL).
 
 ### @rollup
 > **Works in:** JPA · **Not in:** MyBatis (mode: mybatis) (stops the build)
@@ -1171,6 +1177,10 @@ A search DTO's list of values for one column of the entity - `status: List<Order
 ```java
 sp.and((r,q,c) -> r.get("status").in(status));
 ```
+An empty list, like one not sent, is no condition (every row, in JPA, MyBatis and MongoDB); for "none of the rows",
+return an empty page in your service before the search. Bound the number of values with `@maxsize(n)` on the search
+DTO's field (`postIds: List<Long> @search(in) @maxsize(200)`): it becomes `@Size(max=200)`, so a longer list is a 400
+before the query is built.
 
 **List<Entity> field:**
 ```java
@@ -1245,11 +1255,11 @@ dto:
     fields:
       reason: string(100)       # declared in the DTO: always kept
 ```
-- Only the copied fields are filtered. A field declared in the DTO is always kept, and with a listed name it overrides the copied one. A field added to the entity later is not in the DTO until it is listed. A model of another domain: `shop:Order[note]`.
+- Only the copied fields are filtered. A field declared in the DTO is always kept, and with a listed name it overrides the copied one. A field added to the entity later is not in the DTO until it is listed. A model of another domain is named simply too: `Order[note]`.
 - A field the model inherits through its own `@extend` can be listed. A relation's name keeps the field that holds its id: `customer` keeps the `customerId` of a DDD reference, and `customerId` itself is refused, as the list is checked before the reference is rewritten.
 - A name that would give the DTO nothing is refused: a relation with no field that holds its id (declare the id instead, `orderId: long @ref(order.orderId)`), a collection, and a value object where the DTO does not carry one (it carries one whole in `ddd` and `hexagonal`, and in layered MyBatis; not in layered JPA, the compatible output or 2.x).
 - Generation stops on a name the model does not have, a model no domain has, the same model twice (`Order[note], Order[total]` or `Order, Order[note]`), the same field twice (`Order[note, note]`), empty brackets (`Order[]`), `--` on a listed field, a list together with `@extend`, and a list on an entity.
-- Beside a list, a name more than one domain has must say which: `shop:Order[note]`. A DTO without brackets stays as free as it was.
+- A type name is unique across all domains, so the name finds its model wherever it is. Beside a list, a name two domains declare stops the build (`... both have Order - a type name is unique across domains: rename one`).
 - `@searchable` and `@searchResult` take no list, and generation stops on one: a search DTO already takes only the fields with a search condition.
 - A list without the key is not used as the DTO of the entity's service and controller, even if it is declared first. A list with the key can be, so declare the DTO they should use first.
 
@@ -2579,13 +2589,57 @@ Post:
     contentText: text @search(like)                       # its text without tags, for the search
 ```
 
-- `html` is a long text, as `text` is (the same column), marked as HTML. The entity gets `cleanHtml()`, which keeps each html field to a
-  jsoup safelist and writes its text without tags into the `@plain` field. The CoreService calls it on every write - a save, an update,
-  an update by condition, and after a lifecycle command whose parameter sets the field - before the row is written and before
-  `beforeSave`. What is kept is not reformatted.
+- `html` is a long text, as `text` is (the same column), marked as HTML. The CoreService gets a pair of methods per html field that
+  do what `@safe` and `@plain` say: `cleanContent` keeps the markup to a jsoup safelist, and `plainContent` - only where `@plain`
+  names a field - gives its text without tags. The entity sets the field and its copy from what they return (under ddd and
+  hexagonal the copy's setter is the entity's own); `plainContent` gets what `cleanContent` returned. Nothing is reformatted.
+
+  ```java
+  // PostCoreService (generated)
+  protected String cleanContent(Post row, String html) { return Html.clean(html, Safelist.basic()); }  // @safe(basic)
+  protected String plainContent(Post row, String html) { return Html.plain(html); }                   // @plain(contentText)
+  ```
+- They run after the request (or the command) has changed the row, before `beforeSave`, and only where the field changed: on a
+  create unless it is null; on an update, a batch update and an update by condition where the request changed it (the service
+  keeps the value it read); after a lifecycle command where the command changed it - a post an administrator hides is not cleaned
+  again. Neither is called with null, and a field set to null leaves its `@plain` copy null. A row saved before `@plain` was
+  declared gets its copy on its next write: the pair also runs when the copy is null and the html field has a value. An empty
+  copy is a result (a body of images only) and is left alone - but Oracle stores an empty text as NULL, so there such a row is
+  cleaned again on its next write. A value stored before the field became html, or under a looser rule, is not cleaned again
+  until it changes: run the pair, or `cleanHtml()`, once over such rows.
+- **Your own rule: override the pair** in your service (`PostService extends PostCoreService`, generated once and yours). The row
+  has the request's values on it (on a create, a key the database draws may not be there yet). A refusal thrown there -
+  `BadRequestException` with your code, as in `beforeSave` - is answered the same way: 400 with the code and its translation, and
+  the row is not written. Under MongoDB a batch update and an update by condition write document by document, without a
+  transaction: the documents before the refused one stay written. Keeping only this site's images (another host's image tells that
+  host who reads the post), refusing an empty post, and a line per paragraph:
+
+  ```java
+  @Override
+  protected String cleanContent(Post row, String html) {
+      Document doc = Jsoup.parseBodyFragment(Html.clean(html, Safelist.relaxed()));
+      for (Element img : doc.select("img")) {
+          if (!img.attr("src").startsWith("/api/files/")) img.remove();     // only files uploaded here
+      }
+      if (doc.body().text().isBlank() && doc.select("img").isEmpty())
+          throw new BadRequestException("post.content.required", "A post needs a body");
+      doc.outputSettings().prettyPrint(false);
+      return doc.body().html();
+  }
+
+  @Override
+  protected String plainContent(Post row, String html) {
+      return Html.plainLines(html);                                          // a line per paragraph
+  }
+  ```
+  In Kotlin the pair is `protected open fun cleanContent(row: Post, html: String?): String?`; override it the same way.
+- `Html.plainLines(html)` (runtime) ends a line after `p`, `h1`-`h6`, `li`, `blockquote`, `pre`, `div`, `tr`, `br` and `hr`, puts no
+  marker before a list item, drops the spaces before a line's end, keeps at most one blank line and strips both ends; blocks inside
+  each other end one line: `<blockquote><p>a</p></blockquote><ul><li><p>b</p></li></ul>` is `a\nb`. `Html.plain` joins it all.
 - Under MongoDB an entity without a collection of its own (no service, no `@repository` - an order's line) is kept inside the
-  document that holds it, and a request writes it with that document: the holder's service calls its `cleanHtml()` on the same
-  writes - a collection's members, a single one, and the members they hold - after the holder's own, before `beforeSave`.
+  document that holds it, and a request writes it with that document: the holder's service has the member's pair too
+  (`cleanNote(OrderLine row, String html)`) and cleans the member on every write of the holder, changed or not - a collection's
+  members, a single one, and the members they hold - after the holder's own fields, before `beforeSave`.
 - `@safe(basic)`, the default, keeps text markup (paragraphs, emphasis, lists, quotes, code) and links (http, https, ftp, mailto) with
   `rel="nofollow"`, and no images. `@safe(relaxed)` also keeps headings, tables and images (http, https), and adds no `rel`. A script and
   its text, `on...` handlers, `javascript:` links and every other tag and attribute are removed: jsoup's `Safelist.basic()` / `relaxed()`.
@@ -2594,10 +2648,10 @@ Post:
   host that `https://host/x.png` would reach anyway. A link to this site gets no `rel`; `rel="nofollow"` is put on a link to another
   host. A link a browser reads as another host's while it looks like a path here (`/\host`, `https:host`) is removed.
 - `@safe(relaxed)` keeps an image of any http or https host, and loading one tells that host who reads the page. Which images a writer
-  may embed (a file they uploaded, say) is the application's to check, in `beforeSave` - after the clean.
+  may embed (a file they uploaded, say) is the application's to check, in its `cleanContent` (above).
 - `@plain(field)` names a long text field of the same entity (`text`, `longtext` or `clob`). The text without tags - entities read,
-  white space collapsed - is written there on every write, and no request writes it (read-only in the DTO and in TypeScript). Put
-  `@search` on that field: a search then reads the words, not the markup and not a removed script's text.
+  white space collapsed - is written there whenever the html field is cleaned, and no request writes it (read-only in the DTO and in
+  TypeScript). Put `@search` on that field: a search then reads the words, not the markup and not a removed script's text.
 - The application adds jsoup: `implementation 'org.jsoup:jsoup:1.23.2'`. ElastiCORE's runtime is only compiled against it, and the
   generated line names `org.jsoup.safety.Safelist`, so without jsoup the build stops at that line.
 - In TypeScript the field's metadata says `html: true`, so a screen knows it may show the value as HTML.
@@ -2605,8 +2659,10 @@ Post:
   `@safe` or `@plain` on a field that is not html; an html field on a member of an aggregate or on a value object (`@embeddable`) -
   the root's service saves those and would not clean them; the 2.x-compatible output; and the 2.x generator (`elcore`), which would
   store what a request sends.
-- A value set after the service has cleaned the row (in `beforeSave`, or through the repository) is not cleaned: call
-  `entity.cleanHtml()` after setting one.
+- A value set after the service has cleaned the row (in `beforeSave`, or through the repository) is not cleaned: hand the entity
+  the pair after setting one, `entity.cleanContent(html -> cleanContent(entity, html), html -> plainContent(entity, html))`.
+  `entity.cleanHtml()` is still there for code that calls it: it applies the generated defaults (`@safe`, `@plain`) to every
+  html field, not your overrides - the generated service no longer calls it.
 
 ## @encrypt - a column kept encrypted, searched by equality (v3)
 > **Works in:** v3 (JPA: layered, ddd, hexagonal), Kotlin, MyBatis (mode: mybatis) · **Not in:** MongoDB (mode: mongo) (build stops); 2.x-compatible output (output = 'v2') (build stops); 2.x generator (build stops)
